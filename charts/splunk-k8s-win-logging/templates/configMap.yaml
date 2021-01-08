@@ -1,0 +1,184 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "splunk-k8s-win-logging.fullname" . }}
+  labels:
+    app: {{ template "splunk-k8s-win-logging.name" . }}
+    chart: {{ template "splunk-k8s-win-logging.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+data:
+  fluent.conf: |-
+    @include source.containers.conf
+    @include output.conf
+
+  source.containers.conf: |-
+    <source>
+      @id containers.log
+      @type tail
+      @label @CONCAT
+      tag tail.containers.*
+      path {{ .Values.fluentd.path | default "/var/log/containers/*.log" }}
+      {{- if .Values.fluentd.exclude_path }}
+      exclude_path {{ .Values.fluentd.exclude_path | toJson }}
+      {{- end }}
+      pos_file {{ .Values.containers.path }}/splunk-fluentd-containers.log.pos
+      path_key source
+      read_from_head true
+      refresh_interval {{ .Values.containers.refreshInterval | default 60 }}
+      <parse>      
+        @type json
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+        time_key time
+        time_type string
+        localtime false
+      </parse>
+    </source>
+
+  output.conf: |-
+    #Events are emitted to the CONCAT label from the container, file and journald sources for multiline processing.
+    <label @CONCAT>
+    # Events are relabeled then emitted to the SPLUNK label
+      <match **>
+        @type relabel
+        @label @SPLUNK
+      </match>
+    </label>
+    <label @SPLUNK>
+      <filter k8s.**>
+        @type kubernetes_metadata
+        annotation_match [ "^splunk\.com" ]
+        de_dot false
+      </filter>
+      <filter k8s.**>
+        @type record_transformer
+        enable_ruby
+        <record>
+          # set the sourcetype from splunk.com/sourcetype pod annotation or set it to kube:container:CONTAINER_NAME
+          sourcetype ${record.dig("kubernetes", "annotations", "splunk.com/sourcetype") ? record.dig("kubernetes", "annotations", "splunk.com/sourcetype") : "{{ .Values.sourcetypePrefix }}:container:"+record.dig("kubernetes","container_name")}
+          container_name ${record.dig("kubernetes","container_name")}
+          namespace ${record.dig("kubernetes","namespace_name")}
+          pod ${record.dig("kubernetes","pod_name")}
+          container_id ${record.dig("docker","container_id")}
+          pod_uid ${record.dig("kubernetes","pod_id")}
+          container_image ${record.dig("kubernetes","container_image")}
+          # set the cluster_name field to the configured value, or default to "cluster_name"
+          {{- with or .Values.kubernetes.clusterName .Values.global.kubernetes.clusterName | default "cluster_name" }}
+          cluster_name {{ . }}
+          {{- end }}
+          # set the index field to the value found in the pod splunk.com/index annotations. if not set, use namespace annotation, or default to the default_index
+          index ${record.dig("kubernetes", "annotations", "splunk.com/index") ? record.dig("kubernetes", "annotations", "splunk.com/index") : record.dig("kubernetes", "namespace_annotations", "splunk.com/index") ? (record["kubernetes"]["namespace_annotations"]["splunk.com/index"]) : ("{{ or .Values.splunk.hec.indexName .Values.global.splunk.hec.indexName | default "main"}}")}
+          {{- range .Values.k8sMetadata.podLabels }}
+          label_{{ . }} ${record.dig("kubernetes","labels","{{ . }}")}
+          {{- end }}
+          exclude_list ${record.dig("kubernetes", "annotations", "splunk.com/exclude") ? record.dig("kubernetes", "annotations", "splunk.com/exclude") : record.dig("kubernetes", "namespace_annotations", "splunk.com/exclude") ? (record["kubernetes"]["namespace_annotations"]["splunk.com/exclude"]) : ("false")}
+          {{- if .Values.customMetadata }}
+          {{- range .Values.customMetadata }}
+          {{ .name }} "{{ .value }}"
+          {{- end }}
+          {{- end }}
+          {{- if .Values.customMetadataAnnotations }}
+          {{- range .Values.customMetadataAnnotations }}
+          {{ .name }} ${record.dig("kubernetes","annotations","{{ .annotation }}") ? record.dig("kubernetes","annotations","{{ .annotation }}") : record.dig("kubernetes","namespace_annotations","{{ .annotation }}")}
+          {{- end }}
+          {{- end }}
+        </record>
+      </filter>
+      
+      # = output =
+      <match **>
+        {{- if or .Values.splunk.hec.host .Values.global.splunk.hec.host }}
+        @type splunk_hec
+        {{- with or .Values.splunk.hec.protocol .Values.global.splunk.hec.protocol }}
+        protocol {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.hec.host .Values.global.splunk.hec.host }}
+        hec_host {{ . | quote }}
+        {{- end }}
+        {{- with or .Values.splunk.hec.port .Values.global.splunk.hec.port }}
+        hec_port {{ . }}
+        {{- end }}
+        hec_token "#{ENV['SPLUNK_HEC_TOKEN']}"
+        index_key index
+        insecure_ssl {{ or .Values.splunk.hec.insecureSSL .Values.global.splunk.hec.insecureSSL | default false }}
+        {{- if or .Values.splunk.hec.clientCert .Values.global.splunk.hec.clientCert }}
+        client_cert /fluentd/etc/splunk/hec_client_cert
+        {{- end }}
+        {{- if or .Values.splunk.hec.clientKey .Values.global.splunk.hec.clientKey }}
+        client_key /fluentd/etc/splunk/hec_client_key
+        {{- end }}
+        {{- if or .Values.splunk.hec.caFile .Values.global.splunk.hec.caFile }}
+        ca_file /fluentd/etc/splunk/hec_ca_file
+        {{- end }}
+        {{- else }}
+        @type splunk_ingest_api
+        {{- with or .Values.splunk.ingest_api.serviceClientIdentifier }}
+        service_client_identifier {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.serviceClientSecretKey }}
+        service_client_secret_key {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.tokenEndpoint }}
+        token_endpoint {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.ingestAuthHost }}
+        ingest_auth_host {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.ingestAPIHost }}
+        ingest_api_host {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.tenant }}
+        ingest_api_tenant {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.eventsEndpoint }}
+        ingest_api_events_endpoint {{ . }}
+        {{- end }}
+        {{- with or .Values.splunk.ingest_api.debugIngestAPI }}
+        debug_http {{ . }}
+        {{- end }}
+        {{- end }}
+        host "#{ENV['K8S_NODE_NAME']}"
+        source_key source
+        sourcetype_key sourcetype
+        <fields>
+          container_image
+          pod_uid
+          pod
+          container_name
+          namespace
+          container_id
+          {{- if or .Values.kubernetes.clusterName .Values.global.kubernetes.clusterName }}
+          cluster_name
+          {{- end }}
+          {{- if .Values.customMetadata }}
+          {{- range .Values.customMetadata }}
+          {{ .name }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.customMetadataAnnotations }}
+          {{- range .Values.customMetadataAnnotations }}
+          {{ .name }}
+          {{- end }}
+          {{- end }}
+          {{- range .Values.indexFields }}
+          {{ . }}
+          {{- end }}
+          {{- range .Values.k8sMetadata.podLabels }}
+          label_{{ . }}
+          {{- end }}
+        </fields>
+        {{- with .Values.buffer }}
+        <buffer>
+        {{- range $parameter, $value := . }}
+          {{ $parameter }} {{ $value }}
+        {{- end }}
+        </buffer>
+        {{- end }}
+        <format>
+          # we just want to keep the raw logs, not the structure created by docker or journald
+          @type single_value
+          message_key log
+          add_newline false
+        </format>
+      </match>
+    </label>

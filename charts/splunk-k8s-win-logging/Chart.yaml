@@ -1,0 +1,16 @@
+apiVersion: v1
+version: 1.4.3
+appVersion: 1.4.3
+name: splunk-k8s-win-logging
+description: Collect logs with Splunk.
+home: https://github.com/splunk/splunk-connect-for-kubernetes/tree/master/helm-chart/charts/splunk-k8s-win-logging
+sources:
+- https://github.com/splunk/splunk-connect-for-kubernetes/tree/master/helm-chart/charts/splunk-k8s-win-logging
+- https://github.com/splunk/fluent-plugin-splunk-hec
+keywords:
+- splunk
+- monitoring
+- logging
+maintainers:
+- name: Splunk Inc.
+  email: DataEdge@splunk.com
